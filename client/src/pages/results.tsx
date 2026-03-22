@@ -1,7 +1,8 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Card } from "@/components/ui/card";
+import { Card } from '@/components/ui/card';
+import { MetricCard } from '@/components/dashboard/MetricCard';
 import { Button } from "@/components/ui/button";
-import { Plus, Search, Eye, Send, CheckCircle, XCircle, Upload, Globe, FileEdit, Table2, ClipboardList, BookOpen, Trash2, Archive } from "lucide-react";
+import { Search, Eye, Send, CheckCircle, XCircle, Upload, Globe, FileEdit, Table2, ClipboardList, BookOpen, Trash2, Archive } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -14,7 +15,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import type { Result, ResultSheet, ResultSheetEntry, Class, Subject } from "@shared/schema";
 import { BulkResultUploadDialog } from "@/components/results/BulkResultUploadDialog";
 import { UploadResultDialog } from "@/components/results/UploadResultDialog";
@@ -79,6 +80,7 @@ export default function Results() {
   const [bulkActionDialogOpen, setBulkActionDialogOpen] = useState(false);
   const [bulkActionType, setBulkActionType] = useState<"delete" | "archive">("delete");
   const [bulkActionTarget, setBulkActionTarget] = useState<"sheets" | "results">("sheets");
+  const deferredSearchQuery = useDeferredValue(searchQuery);
 
   const { data: results, isLoading } = useQuery<Result[]>({
     queryKey: ["/api/results"],
@@ -250,32 +252,36 @@ export default function Results() {
     }
   };
 
+  const normalizedSearchQuery = deferredSearchQuery.trim().toLowerCase();
   const filteredResults = results?.filter((result) => {
-    const matchesSearch = 
-      result.session.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      result.term.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      result.class.toLowerCase().includes(searchQuery.toLowerCase());
-    
+    const matchesSearch =
+      result.session.toLowerCase().includes(normalizedSearchQuery) ||
+      result.term.toLowerCase().includes(normalizedSearchQuery) ||
+      result.class.toLowerCase().includes(normalizedSearchQuery);
     const matchesStatus = statusFilter === "all" || result.status === statusFilter;
-    
     return matchesSearch && matchesStatus;
   });
-
   const filteredSheets = resultSheets.filter((sheet) => {
     const className = getClassName(sheet.classId);
     const subjectName = getSubjectName(sheet.subjectId);
-    const matchesSearch = 
-      sheet.session.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      sheet.term.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      className.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      subjectName.toLowerCase().includes(searchQuery.toLowerCase());
-    
+    const matchesSearch =
+      sheet.session.toLowerCase().includes(normalizedSearchQuery) ||
+      sheet.term.toLowerCase().includes(normalizedSearchQuery) ||
+      className.toLowerCase().includes(normalizedSearchQuery) ||
+      subjectName.toLowerCase().includes(normalizedSearchQuery);
     const matchesStatus = sheetStatusFilter === "all" || sheet.status === sheetStatusFilter;
-    
     return matchesSearch && matchesStatus;
   });
-
-  const pendingSheetsCount = resultSheets.filter(s => s.status === "submitted").length;
+  const pendingSheetsCount = resultSheets.filter((sheet) => sheet.status === "submitted").length;
+  const resultSummary = useMemo(
+    () => ({
+      totalSheets: resultSheets.length,
+      submittedSheets: pendingSheetsCount,
+      totalResults: results?.length ?? 0,
+      publishedResults: results?.filter((result) => result.status === "published").length ?? 0,
+    }),
+    [pendingSheetsCount, resultSheets.length, results],
+  );
 
   const canSubmit = (result: Result) => 
     (isTeacher || isSchoolAdmin) && (result.status === "draft" || result.status === "rejected");
@@ -356,37 +362,58 @@ export default function Results() {
   };
 
   return (
-    <div className="p-4 md:p-6 space-y-6">
+    <div className="page-shell space-y-6">
+      <div className="premium-shell overflow-hidden">
+        <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/35 to-transparent" />
+        <div className="relative flex flex-col gap-6 p-6 md:p-8">
+          <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+            <div className="max-w-2xl">
+              <span className="section-kicker">Result operations</span>
+              <h2 className="mt-3 text-3xl font-black tracking-[-0.05em] text-foreground md:text-4xl">
+                Review submissions, publish outcomes, and keep every sheet audit-ready.
+              </h2>
+              <p className="mt-3 text-sm leading-7 text-muted-foreground md:text-base">
+                {isTeacher ? "Upload, validate, and submit result sheets with fewer steps." : "Track approvals, resolve issues quickly, and move verified results into publication."}
+              </p>
+            </div>
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3">
+              <Button
+                variant="outline"
+                className="gap-2 rounded-xl"
+                onClick={() => setBulkUploadOpen(true)}
+                data-testid="button-bulk-upload"
+              >
+                <Upload className="w-4 h-4" />
+                <span className="hidden sm:inline">Bulk Upload</span>
+                <span className="sm:hidden">Bulk</span>
+              </Button>
+              <Button
+                onClick={() => setSpreadsheetUploadOpen(true)}
+                className="gap-2 rounded-xl"
+                data-testid="button-upload-result"
+              >
+                <Table2 className="w-4 h-4" />
+                <span className="hidden sm:inline">Upload Results</span>
+                <span className="sm:hidden">Upload</span>
+              </Button>
+            </div>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <MetricCard label="Result Sheets" value={resultSummary.totalSheets} detail="All uploaded sheets across the school." icon={ClipboardList} />
+            <MetricCard label="Awaiting Review" value={resultSummary.submittedSheets} detail="Submitted sheets pending admin action." icon={Send} tone="amber" />
+            <MetricCard label="Student Results" value={resultSummary.totalResults} detail="Generated student result records." icon={BookOpen} tone="violet" />
+            <MetricCard label="Published" value={resultSummary.publishedResults} detail="Results already released to students." icon={Globe} tone="emerald" />
+          </div>
+        </div>
+      </div>
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h2 className="text-2xl md:text-3xl font-bold tracking-tight">Results</h2>
+          <h3 className="text-xl font-semibold tracking-tight">Result workspace</h3>
           <p className="text-muted-foreground">
             {isTeacher ? "Upload and manage student results" : "Review and manage results"}
           </p>
         </div>
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3">
-          <Button 
-            variant="outline" 
-            className="gap-2"
-            onClick={() => setBulkUploadOpen(true)}
-            data-testid="button-bulk-upload"
-          >
-            <Upload className="w-4 h-4" />
-            <span className="hidden sm:inline">Bulk Upload</span>
-            <span className="sm:hidden">Bulk</span>
-          </Button>
-          <Button 
-            onClick={() => setSpreadsheetUploadOpen(true)}
-            className="gap-2"
-            data-testid="button-upload-result"
-          >
-            <Table2 className="w-4 h-4" />
-            <span className="hidden sm:inline">Upload Results</span>
-            <span className="sm:hidden">Upload</span>
-          </Button>
-        </div>
       </div>
-
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <TabsList className="grid w-full grid-cols-2 max-w-md">
           <TabsTrigger value="sheets" className="gap-2" data-testid="tab-result-sheets">
@@ -1016,3 +1043,5 @@ export default function Results() {
     </div>
   );
 }
+
+

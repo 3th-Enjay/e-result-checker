@@ -4,6 +4,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
+import { ThemeProvider } from "@/components/theme-provider";
 import { useEffect, useState } from "react";
 
 // Public Pages
@@ -112,23 +113,17 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return null;
   }
 
-  return (
-    <DashboardLayout user={user} onLogout={handleLogout}>
-      {children}
-    </DashboardLayout>
-  );
+  return <DashboardLayout user={user} onLogout={handleLogout}>{children}</DashboardLayout>;
 }
 
 function Router() {
   return (
     <Switch>
-      {/* Public Routes */}
       <Route path="/" component={Landing} />
       <Route path="/login" component={Login} />
       <Route path="/register" component={Register} />
       <Route path="/check-result" component={CheckResult} />
 
-      {/* Protected Dashboard Routes */}
       <Route path="/dashboard">
         <ProtectedRoute>
           <Dashboard />
@@ -207,7 +202,6 @@ function Router() {
         </ProtectedRoute>
       </Route>
 
-      {/* Fallback to 404 */}
       <Route component={NotFound} />
     </Switch>
   );
@@ -216,10 +210,12 @@ function Router() {
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <Toaster />
-        <Router />
-      </TooltipProvider>
+      <ThemeProvider>
+        <TooltipProvider>
+          <Toaster />
+          <Router />
+        </TooltipProvider>
+      </ThemeProvider>
     </QueryClientProvider>
   );
 }

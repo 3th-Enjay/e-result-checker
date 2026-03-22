@@ -173,7 +173,8 @@
 ## Images
 
 **Hero Section** (Public Landing/Marketing Page - if created):
-- Large hero image showing diverse students celebrating academic success
+- Large hero image using school environments, desks, books, dashboards, or abstract education visuals
+- No student faces or human subjects in marketing hero assets
 - Overlay text: "Transparent, Efficient School Result Management"
 - Blurred background on CTA button
 
@@ -198,3 +199,43 @@
 - Success confirmations: checkmark animation (400ms)
 - NO scroll animations, parallax, or decorative effects
 - Focus on instant feedback for user actions
+---
+
+## Current Implementation Snapshot (March 22, 2026)
+
+### Completed In Repo
+- Premium visual system now uses a deeper trust-driven blue/slate palette, stronger card hierarchy, gradient mesh backgrounds, glassy shell surfaces, and tighter typography.
+- The shared brand layer now includes the reusable `SR` mark, a matching favicon, a theme toggle, and monospace treatment for operational data such as PINs and dashboard metrics.
+- Public-facing pages were redesigned for a more premium SaaS feel: landing page, login, school registration, and result checker now share a more polished narrative and stronger trust cues.
+- The main app shell was upgraded with a more refined sidebar, sticky dashboard header, and a richer notifications surface.
+- Dashboard and analytics experiences now include charts, insight cards, activity timelines, result-status views, PIN usage views, and clearer executive summaries.
+- The results workspace now has a premium hero section, operational summary cards, and cleaner result-sheet/result-management framing.
+- The PIN workspace now supports a more polished register, copy feedback, export flows, usage summaries, and better filtering.
+- School signup was expanded to capture the real backend fields for public registration: school name, school code, school email, school phone, school address, admin first name, admin last name, admin email, password, and logo.
+
+### Prompt Alignment Notes
+- Public marketing visuals should continue to avoid student faces or human subjects and instead use school environments, books, desks, dashboards, and abstract education visuals.
+- Motion should remain subtle and functional: fade, slide, stagger, and feedback states only where they clarify actions.
+- Academic and administrative screens should continue to prioritize trust over decoration.
+
+## Recommended Next UX Improvements
+
+### Highest-Value Next Steps
+1. Add global search across students, results, PINs, and schools so admins can jump directly to entities without navigating multiple pages.
+2. Add inline editing and auto-save drafts to result-sheet workflows so teachers can correct entries without reopening multiple dialogs.
+3. Add stronger empty states and skeleton loaders across analytics, results, and PIN screens to make loading and first-use moments feel more intentional.
+4. Add styled PDF exports for result sheets with watermarking, verification badges, timestamps, and school branding for a more official parent-facing output.
+5. Connect notifications to real backend events so approval, rejection, PIN generation, and publication updates feel live instead of static.
+6. Add a clearer onboarding progress pattern for new schools, including approval status, next steps, and what happens before first login.
+
+### Additional UX Refinements
+- Add debounce and column-level filtering to more admin tables, not just search inputs.
+- Add a reusable mobile action bar or sticky CTA pattern on the highest-frequency mobile workflows.
+- Add a stronger dark-mode QA pass to confirm chart contrast, badge readability, and overlay behavior.
+- Add analytics callouts for top-performing students, classes needing attention, and approval bottlenecks.
+- Add QR support only if there is a verified operational use case for PIN distribution; avoid it if it adds complexity without clear value.
+
+## Signup Status
+- Public signup now aligns with `POST /api/public/register-school` and captures the required school and school-admin fields on the client.
+- Newly registered schools and their initial school-admin accounts remain inactive until a super admin approves them.
+- Login should only be expected after that approval step is complete.
