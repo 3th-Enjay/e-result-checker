@@ -15,6 +15,8 @@ export const users = pgTable("users", {
   role: varchar("role", { length: 20 }).notNull(), // 'super_admin', 'school_admin', 'teacher'
   schoolId: uuid("school_id"),
   isActive: boolean("is_active").default(true).notNull(),
+  onboardingStatus: varchar("onboarding_status", { length: 30 }).default("pending_verification").notNull(),
+  emailVerifiedAt: timestamp("email_verified_at"),
   lastLogin: timestamp("last_login"),
   createdBy: uuid("created_by"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -51,6 +53,10 @@ export const schools = pgTable("schools", {
   logo: text("logo"),
   motto: text("motto"),
   isActive: boolean("is_active").default(false).notNull(),
+  onboardingStatus: varchar("onboarding_status", { length: 30 }).default("pending_verification").notNull(),
+  approvedAt: timestamp("approved_at"),
+  approvedBy: uuid("approved_by"),
+  rejectionReason: text("rejection_reason"),
   gradeRanges: jsonb("grade_ranges"), // [{grade: "A", minScore: 70, maxScore: 100, remark: "Excellent"}, ...]
   computationMode: varchar("computation_mode", { length: 30 }).default("total_average_only"), // 'total_average_only', 'position_average_only', 'total_average_position'
   createdBy: uuid("created_by"),

@@ -132,10 +132,10 @@ A school should be able to create a pending account quickly, verify the admin em
 - approval and rejection flows from the super-admin school review page
 
 ### Suggested improvements inside Phase 1
-- add explicit onboarding status enums for schools and users
+- add explicit onboarding status enums for schools and users (implemented: `onboarding_status` columns)
   - recommended values: `pending_verification`, `pending_review`, `active`, `rejected`, `suspended`
-- store `email_verified_at` directly on the user record
-- add `approved_at`, `approved_by`, and `rejection_reason` to school records
+- store `email_verified_at` directly on the user record (implemented: `email_verified_at`)
+- add `approved_at`, `approved_by`, and `rejection_reason` to school records (implemented: approval + rejection metadata columns)
 - block approval unless email is verified (implemented: enforced in `PATCH /api/schools/:id/status`)
 - add review filters to the Super Admin queue
   - verified only

@@ -112,7 +112,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       if (!user.isActive) {
-        const emailVerified = await hasAuditEvent("verify_email", "user", user.id);
+        const emailVerified = Boolean(user.emailVerifiedAt) || await hasAuditEvent("verify_email", "user", user.id);
         if (!emailVerified) {
           return res.status(403).json({
             code: "EMAIL_VERIFICATION_REQUIRED",
@@ -120,8 +120,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           });
         }
 
+        if (!user.emailVerifiedAt) {
+          await storage.updateUser(user.id, { emailVerifiedAt: new Date(), onboardingStatus: "pending_review" });
+        }
+
         const isRejected = user.schoolId
-          ? await hasAuditEvent("reject_school", "school", user.schoolId)
+          ? (await hasAuditEvent("reject_school", "school", user.schoolId))
           : false;
 
         return res.status(403).json({
@@ -536,7 +540,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       // Phase 1 enforcement: activation requires verified primary admin email.
-      // Verification is currently represented via audit logs (verify_email) rather than a dedicated column.
+      // Verification is represented by emailVerifiedAt (or audit logs as a backward-compatible fallback).
       if (isActive) {
         const schoolUsersForVerification = await storage.listUsers(req.params.id);
         const schoolAdminsForVerification = schoolUsersForVerification
@@ -549,20 +553,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return res.status(400).json({ message: "No school admin found for this school" });
         }
 
-        const emailVerified = await hasAuditEvent("verify_email", "user", primaryAdmin.id);
+        const emailVerified = Boolean(primaryAdmin.emailVerifiedAt) || await hasAuditEvent("verify_email", "user", primaryAdmin.id);
         if (!emailVerified) {
           return res.status(403).json({ message: "Cannot activate school before admin email verification." });
         }
       }
 
-      const updated = await storage.updateSchool(req.params.id, { isActive });
+      const updated = await storage.updateSchool(req.params.id, {
+        isActive,
+        onboardingStatus: isActive ? "active" : school.onboardingStatus,
+        approvedAt: isActive ? new Date() : school.approvedAt,
+        approvedBy: isActive ? req.user!.id : school.approvedBy,
+      });
 
       const schoolUsers = await storage.listUsers(req.params.id);
       const schoolAdmins = schoolUsers.filter((user) => user.role === "school_admin");
       for (const admin of schoolAdmins) {
         if (isActive) {
           // Only activate admins whose email has been verified.
-          const adminEmailVerified = await hasAuditEvent("verify_email", "user", admin.id);
+          const adminEmailVerified = Boolean(admin.emailVerifiedAt) || await hasAuditEvent("verify_email", "user", admin.id);
           const shouldBeActive = adminEmailVerified;
           if (admin.isActive !== shouldBeActive) {
             await storage.updateUser(admin.id, { isActive: shouldBeActive });
@@ -572,7 +581,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
 
         if (isActive) {
-          const adminEmailVerified = await hasAuditEvent("verify_email", "user", admin.id);
+          const adminEmailVerified = Boolean(admin.emailVerifiedAt) || await hasAuditEvent("verify_email", "user", admin.id);
           if (!adminEmailVerified) {
             continue;
           }
@@ -629,6 +638,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (school.isActive) {
         await storage.updateSchool(req.params.id, { isActive: false });
       }
+
+      await storage.updateSchool(req.params.id, {
+        onboardingStatus: "rejected",
+        rejectionReason: reason,
+      });
 
       const schoolUsers = await storage.listUsers(req.params.id);
       const schoolAdmins = schoolUsers.filter((user) => user.role === "school_admin");
@@ -2259,6 +2273,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           resourceId: user.id,
           details: { email: user.email },
         });
+
+        await storage.updateUser(user.id, { emailVerifiedAt: new Date(), onboardingStatus: "pending_review" });
+        await storage.updateSchool(school.id, { onboardingStatus: "pending_review" });
 
         await storage.createNotification({
           userId: user.id,
