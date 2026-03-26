@@ -141,6 +141,10 @@ A school should be able to create a pending account quickly, verify the admin em
   - verified only
   - pending too long
   - generic email domains
+- add review filters to the Super Admin queue (implemented: `/api/schools/review-queue?filter=...` + `Review Queue` UI)
+  - verified only
+  - pending too long
+  - generic email domains
 - add audit log detail for which provider sent the email and whether delivery fell back
 - improve inline subdomain availability feedback directly on the signup step
 

@@ -47,6 +47,7 @@ export function AppSidebar({ user }: AppSidebarProps) {
 
   const superAdminItems = [
     { title: "Dashboard", url: "/dashboard", icon: Home },
+    { title: "Review Queue", url: "/school-review-queue", icon: ClipboardList },
     { title: "Schools", url: "/schools", icon: School },
     { title: "Users", url: "/users", icon: Users },
     { title: "PINs", url: "/pins", icon: Key },

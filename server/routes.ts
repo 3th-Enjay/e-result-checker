@@ -190,10 +190,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/schools/review-queue", authenticate, authorize("super_admin"), async (_req, res) => {
+  app.get("/api/schools/review-queue", authenticate, authorize("super_admin"), async (req, res) => {
     try {
+      const filter = typeof req.query.filter === "string" ? req.query.filter : "all";
+      const pendingTooLongDaysRaw = typeof req.query.pendingTooLongDays === "string" ? req.query.pendingTooLongDays : "";
+      const pendingTooLongDays = Math.max(1, Math.min(365, Number.parseInt(pendingTooLongDaysRaw || "7", 10) || 7));
+
       const reviewQueue = await buildReviewQueue();
-      res.json(reviewQueue);
+      const now = Date.now();
+      const thresholdMs = pendingTooLongDays * 24 * 60 * 60 * 1000;
+
+      const filtered = reviewQueue.filter((school) => {
+        if (filter === "verified_only") {
+          return school.reviewStatus === "pending" && school.emailVerified;
+        }
+        if (filter === "pending_too_long") {
+          const createdAt = school.createdAt ? new Date(school.createdAt).getTime() : now;
+          return school.reviewStatus === "pending" && now - createdAt >= thresholdMs;
+        }
+        if (filter === "generic_email") {
+          const email = school.primaryAdmin?.email?.toLowerCase() || "";
+          const domain = email.split("@")[1] || "";
+          return Boolean(domain) && ["gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com", "aol.com", "proton.me", "protonmail.com"].includes(domain);
+        }
+        return true;
+      });
+
+      res.json(filtered);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }

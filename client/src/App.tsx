@@ -19,6 +19,7 @@ import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/dashboard";
 import Onboarding from "@/pages/onboarding";
 import Schools from "@/pages/schools";
+import SchoolReviewQueue from "@/pages/school-review-queue";
 import Students from "@/pages/students";
 import Results from "@/pages/results";
 import Pins from "@/pages/pins";
@@ -224,6 +225,12 @@ function Router() {
       <Route path="/dashboard">
         <ProtectedRoute>
           <Dashboard />
+        </ProtectedRoute>
+      </Route>
+
+      <Route path="/school-review-queue">
+        <ProtectedRoute>
+          <SchoolReviewQueue />
         </ProtectedRoute>
       </Route>
 
