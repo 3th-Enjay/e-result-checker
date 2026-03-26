@@ -11,11 +11,13 @@ import { useEffect, useState } from "react";
 import Landing from "@/pages/landing";
 import Login from "@/pages/login";
 import Register from "@/pages/register";
+import VerifyEmail from "@/pages/verify-email";
 import CheckResult from "@/pages/check-result";
 import NotFound from "@/pages/not-found";
 
 // Dashboard Pages
 import Dashboard from "@/pages/dashboard";
+import Onboarding from "@/pages/onboarding";
 import Schools from "@/pages/schools";
 import Students from "@/pages/students";
 import Results from "@/pages/results";
@@ -42,6 +44,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const [location, setLocation] = useLocation();
   const [user, setUser] = useState<User | null>(null);
   const [validating, setValidating] = useState(true);
+  const [onboardingCompletion, setOnboardingCompletion] = useState<number | null>(null);
 
   useEffect(() => {
     const storedUser = localStorage.getItem("user");
@@ -101,6 +104,63 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     }
   }, [user, location, validating, setLocation]);
 
+  // Phase 2 onboarding redirect for school admins
+  useEffect(() => {
+    if (!user || validating) return;
+
+    if (user.role !== "school_admin") {
+      setOnboardingCompletion(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadOnboardingStatus() {
+      try {
+        const token = localStorage.getItem("token");
+        if (!token) {
+          if (!cancelled) setOnboardingCompletion(null);
+          return;
+        }
+
+        const base = import.meta.env.VITE_API_URL || "";
+        const res = await fetch(`${base}/api/onboarding/status`, {
+          headers: { Authorization: `Bearer ${token}` },
+          credentials: "include",
+        });
+
+        if (!res.ok) {
+          if (!cancelled) setOnboardingCompletion(null);
+          return;
+        }
+
+        const payload = await res.json();
+        if (!cancelled) {
+          setOnboardingCompletion(typeof payload.completionPercent === "number" ? payload.completionPercent : null);
+        }
+      } catch {
+        if (!cancelled) setOnboardingCompletion(null);
+      }
+    }
+
+    // Refetch on navigation so "completion" updates after the user completes checklist steps.
+    void loadOnboardingStatus();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, validating, location]);
+
+  useEffect(() => {
+    if (!user || validating) return;
+    if (user.role !== "school_admin") return;
+    if (onboardingCompletion === null) return;
+
+    if (location !== "/onboarding" && onboardingCompletion < 100) {
+      setLocation("/onboarding");
+    }
+  }, [user, location, validating, onboardingCompletion, setLocation]);
+
   const handleLogout = () => {
     localStorage.removeItem("user");
     localStorage.removeItem("token");
@@ -122,7 +182,14 @@ function Router() {
       <Route path="/" component={Landing} />
       <Route path="/login" component={Login} />
       <Route path="/register" component={Register} />
+      <Route path="/verify-email" component={VerifyEmail} />
       <Route path="/check-result" component={CheckResult} />
+
+      <Route path="/onboarding">
+        <ProtectedRoute>
+          <Onboarding />
+        </ProtectedRoute>
+      </Route>
 
       <Route path="/dashboard">
         <ProtectedRoute>
@@ -221,3 +288,4 @@ function App() {
 }
 
 export default App;
+
