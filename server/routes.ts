@@ -237,6 +237,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ message: "School not found" });
       }
 
+      const schoolAdmins = users
+        .filter((u) => u.role === "school_admin")
+        // Latest created admin is treated as "primary" for consistency with review queue.
+        .sort((a, b) => new Date(b.createdAt || "").getTime() - new Date(a.createdAt || "").getTime());
+      const primaryAdmin = schoolAdmins[0] || null;
+
+      const assistant = getOnboardingAssistant({
+        schoolName: school.name,
+        adminEmail: primaryAdmin?.email,
+        schoolEmail: school.email,
+        preferredSubdomain: school.subdomain || undefined,
+      });
+
       const teachers = users.filter((u) => u.role === "teacher");
 
       const steps = [
@@ -282,7 +295,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const completionPercent = Math.round((doneSteps / totalSteps) * 100);
       const nextStepId = steps.find((s) => !s.done)?.id;
 
-      res.json({ completionPercent, steps, nextStepId });
+      res.json({
+        completionPercent,
+        steps,
+        nextStepId,
+        assistant: {
+          ...assistant,
+          // Prefer existing values from records when available.
+          suggestedSchoolCode: school.code || assistant.suggestedSchoolCode,
+          suggestedSubdomain: school.subdomain || assistant.suggestedSubdomain,
+        },
+      });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }

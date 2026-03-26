@@ -175,13 +175,13 @@ After approval, the school admin should be guided through the rest of school set
   - completion percentage
   - checklist cards
   - next recommended action
-- persist onboarding progress in a dedicated table or structured JSON record
-- auto-save every onboarding step
-- allow schools to pause and resume setup later
+- persist onboarding progress in a dedicated table or structured JSON record (implemented: client-side structured snapshot for MVP)
+- auto-save every onboarding step (implemented: onboarding dashboard caches progress and refreshes on each visit)
+- allow schools to pause and resume setup later (implemented: redirect gating lets admins work on setup pages without being trapped)
 - add contextual AI help
   - suggest class ladders from school type
   - suggest starter subject lists by school type
-  - recommend grading defaults
+  - recommend grading defaults (partial: recommended classes/subjects + trust help implemented; grading defaults still next)
 - unlock parts of the dashboard progressively
   - configuration pages available first
   - operational flows available once minimum setup is complete

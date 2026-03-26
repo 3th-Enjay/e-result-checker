@@ -40,11 +40,18 @@ interface User {
   schoolId?: string;
 }
 
+type OnboardingStep = { id: string; done: boolean };
+type OnboardingStatusPayload = {
+  completionPercent: number;
+  steps: OnboardingStep[];
+  nextStepId?: string;
+};
+
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const [location, setLocation] = useLocation();
   const [user, setUser] = useState<User | null>(null);
   const [validating, setValidating] = useState(true);
-  const [onboardingCompletion, setOnboardingCompletion] = useState<number | null>(null);
+  const [onboardingStatus, setOnboardingStatus] = useState<OnboardingStatusPayload | null>(null);
 
   useEffect(() => {
     const storedUser = localStorage.getItem("user");
@@ -109,7 +116,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     if (!user || validating) return;
 
     if (user.role !== "school_admin") {
-      setOnboardingCompletion(null);
+      setOnboardingStatus(null);
       return;
     }
 
@@ -119,7 +126,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
       try {
         const token = localStorage.getItem("token");
         if (!token) {
-          if (!cancelled) setOnboardingCompletion(null);
+          if (!cancelled) setOnboardingStatus(null);
           return;
         }
 
@@ -130,16 +137,18 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
         });
 
         if (!res.ok) {
-          if (!cancelled) setOnboardingCompletion(null);
+          if (!cancelled) setOnboardingStatus(null);
           return;
         }
 
         const payload = await res.json();
         if (!cancelled) {
-          setOnboardingCompletion(typeof payload.completionPercent === "number" ? payload.completionPercent : null);
+          setOnboardingStatus(
+            typeof payload.completionPercent === "number" && Array.isArray(payload.steps) ? payload : null,
+          );
         }
       } catch {
-        if (!cancelled) setOnboardingCompletion(null);
+        if (!cancelled) setOnboardingStatus(null);
       }
     }
 
@@ -154,12 +163,33 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!user || validating) return;
     if (user.role !== "school_admin") return;
-    if (onboardingCompletion === null) return;
+    if (!onboardingStatus) return;
+    if (onboardingStatus.completionPercent >= 100) return;
+    if (location === "/onboarding") return;
 
-    if (location !== "/onboarding" && onboardingCompletion < 100) {
-      setLocation("/onboarding");
+    const routeToStepId: Record<string, string> = {
+      "/profile": "profile",
+      "/classes": "classes",
+      "/subjects": "subjects",
+      "/score-metrics": "score-metrics",
+      "/teachers": "staff",
+    };
+
+    const stepId = routeToStepId[location];
+    if (stepId) {
+      const stepOrder = onboardingStatus.steps.map((s) => s.id);
+      const idx = stepOrder.indexOf(stepId);
+      const doneById = new Map(onboardingStatus.steps.map((s) => [s.id, s.done]));
+      const prereqsOk = idx <= 0 ? true : stepOrder.slice(0, idx).every((id) => doneById.get(id) === true);
+      if (!prereqsOk) {
+        setLocation("/onboarding");
+      }
+      return;
     }
-  }, [user, location, validating, onboardingCompletion, setLocation]);
+
+    // Any non-configuration routes are blocked until minimum setup is complete.
+    setLocation("/onboarding");
+  }, [user, location, validating, onboardingStatus, setLocation]);
 
   const handleLogout = () => {
     localStorage.removeItem("user");
