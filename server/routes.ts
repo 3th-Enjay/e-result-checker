@@ -6,7 +6,10 @@ import { calculateResults, generatePIN, getGradeAndRemark } from "./utils/result
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { insertUserSchema, insertStudentSchema, insertResultSchema, insertPinRequestSchema, insertClassSchema, insertSubjectSchema, GradeRange, DEFAULT_GRADE_RANGES, gradeRangeSchema } from "@shared/schema";
+import { createSchoolCode, getOnboardingAssistant, slugifySchoolName } from "@shared/onboarding";
 import { z } from "zod";
+import { buildReviewQueue, hasAuditEvent } from "./onboarding-review";
+import { buildVerificationUrl, sendApprovalEmail, sendRejectionEmail, sendVerificationEmail } from "./onboarding-email";
 
 // Helper function to get school's grade configuration
 async function getSchoolGradeRanges(schoolId: string): Promise<GradeRange[]> {
@@ -15,6 +18,70 @@ async function getSchoolGradeRanges(schoolId: string): Promise<GradeRange[]> {
     return school.gradeRanges as GradeRange[];
   }
   return DEFAULT_GRADE_RANGES;
+}
+
+function trimOptionalString(value?: string | null) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+async function listSuperAdmins() {
+  const allUsers = await storage.listUsers();
+  return allUsers.filter((user) => user.role === "super_admin");
+}
+
+async function resolveUniqueSchoolCode(name: string, preferredCode?: string | null) {
+  const baseCode = (trimOptionalString(preferredCode)?.replace(/[^A-Za-z0-9]/g, "").toUpperCase() || createSchoolCode(name)).slice(0, 6) || "SCH";
+  let candidate = baseCode;
+  let counter = 2;
+
+  while (await storage.getSchoolByCode(candidate)) {
+    const suffix = String(counter);
+    candidate = `${baseCode.slice(0, Math.max(1, 6 - suffix.length))}${suffix}`;
+    counter += 1;
+  }
+
+  return candidate;
+}
+
+async function resolveUniqueSubdomain(name: string, preferredSubdomain?: string | null) {
+  const requested = trimOptionalString(preferredSubdomain);
+  const assistant = getOnboardingAssistant({ schoolName: name, preferredSubdomain: requested });
+
+  for (const candidate of assistant.subdomainCandidates) {
+    const existing = await storage.getSchoolBySubdomain(candidate);
+    if (!existing) {
+      return candidate;
+    }
+  }
+
+  const base = slugifySchoolName(requested || name).slice(0, 40);
+  let counter = assistant.subdomainCandidates.length + 1;
+
+  while (counter < 500) {
+    const suffix = `-${counter}`;
+    const candidate = `${base.slice(0, Math.max(1, 40 - suffix.length))}${suffix}`;
+    const existing = await storage.getSchoolBySubdomain(candidate);
+    if (!existing) {
+      return candidate;
+    }
+    counter += 1;
+  }
+
+  return `${base}-x`;
+}
+
+function buildEmailVerificationToken(user: { id: string; email: string; schoolId?: string | null }) {
+  return jwt.sign(
+    {
+      type: "school_email_verification",
+      userId: user.id,
+      schoolId: user.schoolId,
+      email: user.email,
+    },
+    JWT_SECRET,
+    { expiresIn: "24h" },
+  );
 }
 
 // Legacy helper functions - now use configurable grade ranges
@@ -45,7 +112,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       if (!user.isActive) {
-        return res.status(403).json({ message: "Account is pending approval" });
+        const emailVerified = await hasAuditEvent("verify_email", "user", user.id);
+        if (!emailVerified) {
+          return res.status(403).json({
+            code: "EMAIL_VERIFICATION_REQUIRED",
+            message: "Verify your email to continue.",
+          });
+        }
+
+        const isRejected = user.schoolId
+          ? await hasAuditEvent("reject_school", "school", user.schoolId)
+          : false;
+
+        return res.status(403).json({
+          code: isRejected ? "SCHOOL_REJECTED" : "ACCOUNT_PENDING_APPROVAL",
+          message: isRejected
+            ? "This school signup is awaiting corrections before activation."
+            : "Account is pending super admin approval.",
+        });
       }
 
       await storage.updateUser(user.id, { lastLogin: new Date() });
@@ -101,6 +185,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const schools = await storage.listSchools();
       res.json(schools);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.get("/api/schools/review-queue", authenticate, authorize("super_admin"), async (_req, res) => {
+    try {
+      const reviewQueue = await buildReviewQueue();
+      res.json(reviewQueue);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
@@ -323,18 +416,71 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ message: "School not found" });
       }
 
-      const updated = await storage.updateSchool(req.params.id, { isActive });
+      // Phase 1 enforcement: activation requires verified primary admin email.
+      // Verification is currently represented via audit logs (verify_email) rather than a dedicated column.
+      if (isActive) {
+        const schoolUsersForVerification = await storage.listUsers(req.params.id);
+        const schoolAdminsForVerification = schoolUsersForVerification
+          .filter((user) => user.role === "school_admin")
+          // "Primary" admin is defined as the latest created school_admin (same heuristic as buildReviewQueue()).
+          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-      // Keep the primary school admin in sync with school approval status.
-      const schoolUsers = await storage.listUsers(req.params.id);
-      const schoolAdmins = schoolUsers.filter((user) => user.role === "school_admin");
-      for (const admin of schoolAdmins) {
-        if (admin.isActive !== isActive) {
-          await storage.updateUser(admin.id, { isActive });
+        const primaryAdmin = schoolAdminsForVerification[0];
+        if (!primaryAdmin) {
+          return res.status(400).json({ message: "No school admin found for this school" });
+        }
+
+        const emailVerified = await hasAuditEvent("verify_email", "user", primaryAdmin.id);
+        if (!emailVerified) {
+          return res.status(403).json({ message: "Cannot activate school before admin email verification." });
         }
       }
 
-      // Create audit log
+      const updated = await storage.updateSchool(req.params.id, { isActive });
+
+      const schoolUsers = await storage.listUsers(req.params.id);
+      const schoolAdmins = schoolUsers.filter((user) => user.role === "school_admin");
+      for (const admin of schoolAdmins) {
+        if (isActive) {
+          // Only activate admins whose email has been verified.
+          const adminEmailVerified = await hasAuditEvent("verify_email", "user", admin.id);
+          const shouldBeActive = adminEmailVerified;
+          if (admin.isActive !== shouldBeActive) {
+            await storage.updateUser(admin.id, { isActive: shouldBeActive });
+          }
+        } else if (admin.isActive !== false) {
+          await storage.updateUser(admin.id, { isActive: false });
+        }
+
+        if (isActive) {
+          const adminEmailVerified = await hasAuditEvent("verify_email", "user", admin.id);
+          if (!adminEmailVerified) {
+            continue;
+          }
+
+          await storage.createNotification({
+            userId: admin.id,
+            type: "school_approved",
+            title: "School approved",
+            message: `${school.name} has been activated and is ready for login.`,
+            data: { schoolId: school.id },
+          });
+          await sendApprovalEmail({
+            to: admin.email,
+            schoolName: school.name,
+            subdomain: school.subdomain || `${slugifySchoolName(school.name)}.smartresult.app`,
+          });
+        } else if (school.isActive) {
+          await storage.createNotification({
+            userId: admin.id,
+            type: "school_deactivated",
+            title: "School access paused",
+            message: `${school.name} is not active right now. Contact platform support if this was unexpected.`,
+            data: { schoolId: school.id },
+          });
+        }
+      }
+
       await storage.createAuditLog({
         userId: req.user!.id,
         action: isActive ? "activate_school" : "deactivate_school",
@@ -349,6 +495,57 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  const rejectSchoolSchema = z.object({
+    reason: z.string().min(5, "Provide a reason before rejecting this signup"),
+  });
+
+  app.post("/api/schools/:id/reject", authenticate, authorize("super_admin"), async (req: AuthRequest, res) => {
+    try {
+      const { reason } = rejectSchoolSchema.parse(req.body);
+      const school = await storage.getSchool(req.params.id);
+      if (!school) {
+        return res.status(404).json({ message: "School not found" });
+      }
+
+      if (school.isActive) {
+        await storage.updateSchool(req.params.id, { isActive: false });
+      }
+
+      const schoolUsers = await storage.listUsers(req.params.id);
+      const schoolAdmins = schoolUsers.filter((user) => user.role === "school_admin");
+      for (const admin of schoolAdmins) {
+        if (admin.isActive) {
+          await storage.updateUser(admin.id, { isActive: false });
+        }
+
+        await storage.createNotification({
+          userId: admin.id,
+          type: "school_rejected",
+          title: "School signup needs attention",
+          message: `${school.name} was not approved yet. Reason: ${reason}`,
+          data: { schoolId: school.id, reason },
+        });
+        await sendRejectionEmail({
+          to: admin.email,
+          schoolName: school.name,
+          reason,
+        });
+      }
+
+      await storage.createAuditLog({
+        userId: req.user!.id,
+        schoolId: school.id,
+        action: "reject_school",
+        resource: "school",
+        resourceId: school.id,
+        details: { reason },
+      });
+
+      res.json({ message: "School rejected successfully", schoolId: school.id, reason });
+    } catch (error: any) {
+      res.status(400).json({ message: error.message });
+    }
+  });
   app.delete("/api/schools/:id", authenticate, authorize("super_admin"), async (req, res) => {
     try {
       await storage.deleteSchool(req.params.id);
@@ -1846,64 +2043,273 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Public school registration (for school admins to register themselves)
   const publicRegisterSchema = z.object({
     schoolName: z.string().min(1, "School name is required"),
-    schoolCode: z.string().min(1, "School code is required").toUpperCase(),
-    schoolEmail: z.string().email("Valid email required"),
+    schoolCode: z.string().optional(),
+    preferredSubdomain: z.string().optional(),
+    schoolEmail: z.union([z.string().email("Valid email required"), z.literal("")]).optional(),
     schoolPhone: z.string().optional(),
     schoolAddress: z.string().optional(),
-    adminFirstName: z.string().min(1, "First name is required"),
-    adminLastName: z.string().min(1, "Last name is required"),
+    adminFirstName: z.string().optional(),
+    adminLastName: z.string().optional(),
     adminEmail: z.string().email("Valid email required"),
     adminPassword: z.string().min(6, "Password must be at least 6 characters"),
     logo: z.string().optional(),
   });
 
+  const onboardingAssistantSchema = z.object({
+    schoolName: z.string().min(1, "School name is required"),
+    adminEmail: z.string().email("Valid admin email required"),
+    schoolEmail: z.union([z.string().email("Valid school email required"), z.literal("")]).optional(),
+    preferredSubdomain: z.string().optional(),
+  });
+
+  const emailVerificationSchema = z.object({
+    token: z.string().min(1, "Verification token is required"),
+  });
+
+  const resendVerificationSchema = z.object({
+    email: z.string().email("Valid email required"),
+  });
+
+  app.get("/api/public/subdomains/check", async (req, res) => {
+    try {
+      const rawValue = typeof req.query.value === "string" ? req.query.value : "";
+      const requested = slugifySchoolName(rawValue);
+      const existing = await storage.getSchoolBySubdomain(requested);
+      const suggestion = await resolveUniqueSubdomain(rawValue || requested);
+
+      res.json({
+        requested,
+        available: !existing,
+        suggestion,
+      });
+    } catch (error: any) {
+      res.status(400).json({ message: error.message });
+    }
+  });
+
+  app.post("/api/public/onboarding-assistant", async (req, res) => {
+    try {
+      const validated = onboardingAssistantSchema.parse(req.body);
+      const assistant = getOnboardingAssistant(validated);
+      const requestedSubdomain = slugifySchoolName(validated.preferredSubdomain || assistant.suggestedSubdomain);
+      const existing = await storage.getSchoolBySubdomain(requestedSubdomain);
+      const suggestedSubdomain = await resolveUniqueSubdomain(validated.schoolName, validated.preferredSubdomain);
+
+      res.json({
+        ...assistant,
+        requestedSubdomain,
+        subdomainAvailable: !existing,
+        suggestedSubdomain,
+      });
+    } catch (error: any) {
+      res.status(400).json({ message: error.message });
+    }
+  });
+
+  app.post("/api/public/verify-email", async (req, res) => {
+    try {
+      const { token } = emailVerificationSchema.parse(req.body);
+      const decoded = jwt.verify(token, JWT_SECRET) as {
+        type: string;
+        userId: string;
+        email: string;
+        schoolId?: string;
+      };
+
+      if (decoded.type !== "school_email_verification") {
+        return res.status(400).json({ message: "Invalid verification token" });
+      }
+
+      const user = await storage.getUser(decoded.userId);
+      if (!user || user.email !== decoded.email) {
+        return res.status(400).json({ message: "Verification target not found" });
+      }
+
+      const school = user.schoolId ? await storage.getSchool(user.schoolId) : undefined;
+      if (!school) {
+        return res.status(400).json({ message: "School not found for this verification request" });
+      }
+
+      const alreadyVerified = await hasAuditEvent("verify_email", "user", user.id);
+      if (!alreadyVerified) {
+        await storage.createAuditLog({
+          userId: user.id,
+          schoolId: school.id,
+          action: "verify_email",
+          resource: "user",
+          resourceId: user.id,
+          details: { email: user.email },
+        });
+
+        await storage.createNotification({
+          userId: user.id,
+          type: "email_verified",
+          title: "Email verified",
+          message: `Your email for ${school.name} has been verified. The school is now waiting for super admin approval.`,
+          data: { schoolId: school.id },
+        });
+
+        const superAdmins = await listSuperAdmins();
+        for (const admin of superAdmins) {
+          await storage.createNotification({
+            userId: admin.id,
+            type: "school_ready_for_review",
+            title: "School ready for review",
+            message: `${school.name} verified its primary admin email and is ready for approval review.`,
+            data: { schoolId: school.id },
+          });
+        }
+      }
+
+      res.json({
+        message: alreadyVerified
+          ? "Email already verified. Your school is still waiting for super admin approval."
+          : "Email verified successfully. Your school is now waiting for super admin approval.",
+        school: {
+          id: school.id,
+          name: school.name,
+          subdomain: school.subdomain,
+          isActive: school.isActive,
+        },
+      });
+    } catch (error: any) {
+      const message = error.name === "TokenExpiredError"
+        ? "This verification link has expired. Request a fresh email and try again."
+        : error.message;
+      res.status(400).json({ message });
+    }
+  });
+
+  app.post("/api/public/resend-verification", async (req, res) => {
+    try {
+      const { email } = resendVerificationSchema.parse(req.body);
+      const user = await storage.getUserByEmail(email);
+      if (!user || user.role !== "school_admin" || !user.schoolId) {
+        return res.status(404).json({ message: "No pending school signup was found for that email." });
+      }
+
+      const alreadyVerified = await hasAuditEvent("verify_email", "user", user.id);
+      if (alreadyVerified) {
+        return res.json({ message: "This email is already verified. The school now only needs super admin approval." });
+      }
+
+      const school = await storage.getSchool(user.schoolId);
+      if (!school) {
+        return res.status(404).json({ message: "School not found" });
+      }
+
+      const verificationToken = buildEmailVerificationToken(user);
+      const verificationUrl = buildVerificationUrl(verificationToken);
+      const emailDelivery = await sendVerificationEmail({
+        to: user.email,
+        schoolName: school.name,
+        verificationUrl,
+        subdomain: school.subdomain || `${slugifySchoolName(school.name)}.smartresult.app`,
+      });
+
+      res.json({
+        message: "Verification email sent successfully.",
+        emailDelivery,
+        verificationPreviewUrl: emailDelivery.mode === "console" ? verificationUrl : undefined,
+      });
+    } catch (error: any) {
+      res.status(400).json({ message: error.message });
+    }
+  });
+
   app.post("/api/public/register-school", async (req, res) => {
     try {
       const validated = publicRegisterSchema.parse(req.body);
-
-      // Check if school code already exists
-      const existingSchool = await storage.getSchoolByCode(validated.schoolCode);
-      if (existingSchool) {
-        return res.status(400).json({ message: "School code already exists" });
-      }
-
-      // Check if admin email already exists
       const existingUser = await storage.getUserByEmail(validated.adminEmail);
       if (existingUser) {
         return res.status(400).json({ message: "Email already registered" });
       }
 
-      // Create the school (pending approval) — no subdomain/createdBy for public registration
+      const schoolCode = await resolveUniqueSchoolCode(validated.schoolName, validated.schoolCode);
+      const subdomain = await resolveUniqueSubdomain(validated.schoolName, validated.preferredSubdomain);
+      const schoolEmail = trimOptionalString(validated.schoolEmail) || validated.adminEmail;
+      const adminFirstName = trimOptionalString(validated.adminFirstName) || "School";
+      const adminLastName = trimOptionalString(validated.adminLastName) || "Admin";
+
       const school = await storage.createSchool({
         name: validated.schoolName,
-        code: validated.schoolCode,
-        subdomain: null,
-        email: validated.schoolEmail,
-        phone: validated.schoolPhone ?? "",
-        address: validated.schoolAddress ?? "",
+        code: schoolCode,
+        subdomain,
+        email: schoolEmail,
+        phone: trimOptionalString(validated.schoolPhone) || "",
+        address: trimOptionalString(validated.schoolAddress) || "",
         logo: validated.logo,
-        isActive: false, // Requires super admin approval
+        isActive: false,
         createdBy: undefined,
       });
 
-      // Hash password and create admin user
       const hashedPassword = await bcrypt.hash(validated.adminPassword, 10);
       const user = await storage.createUser({
         email: validated.adminEmail,
         password: hashedPassword,
-        firstName: validated.adminFirstName,
-        lastName: validated.adminLastName,
+        firstName: adminFirstName,
+        lastName: adminLastName,
         role: "school_admin",
         schoolId: school.id,
-        isActive: false, // Requires super admin approval
+        isActive: false,
       });
 
+      await storage.createAuditLog({
+        userId: user.id,
+        schoolId: school.id,
+        action: "register_school",
+        resource: "school",
+        resourceId: school.id,
+        details: {
+          adminEmail: user.email,
+          subdomain,
+        },
+      });
+
+      const verificationToken = buildEmailVerificationToken(user);
+      const verificationUrl = buildVerificationUrl(verificationToken);
+      const emailDelivery = await sendVerificationEmail({
+        to: user.email,
+        schoolName: school.name,
+        verificationUrl,
+        subdomain: `${subdomain}.smartresult.app`,
+      });
+
+      const superAdmins = await listSuperAdmins();
+      for (const admin of superAdmins) {
+        await storage.createNotification({
+          userId: admin.id,
+          type: "school_signup_received",
+          title: "New school signup received",
+          message: `${school.name} created a new workspace and is waiting for email verification.`,
+          data: { schoolId: school.id },
+        });
+      }
+
+      const assistant = getOnboardingAssistant({
+        schoolName: validated.schoolName,
+        adminEmail: validated.adminEmail,
+        schoolEmail,
+        preferredSubdomain: validated.preferredSubdomain,
+      });
       const { password: _, ...userWithoutPassword } = user;
 
       res.status(201).json({
-        message: "Registration successful! Your account is pending approval.",
-        school: { id: school.id, name: school.name, code: school.code },
+        message: "Registration successful. Verify your email to continue.",
+        school: {
+          id: school.id,
+          name: school.name,
+          code: school.code,
+          subdomain: school.subdomain,
+        },
         user: userWithoutPassword,
+        assistant: {
+          ...assistant,
+          suggestedSchoolCode: school.code,
+          suggestedSubdomain: school.subdomain,
+        },
+        emailDelivery,
+        verificationPreviewUrl: emailDelivery.mode === "console" ? verificationUrl : undefined,
       });
     } catch (error: any) {
       if (error.name === "ZodError") {
@@ -2591,3 +2997,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
   return httpServer;
 }
+
+
+
