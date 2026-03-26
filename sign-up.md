@@ -1,6 +1,200 @@
 # Sign-Up And Onboarding Specification
 
 ## Purpose
+This document defines the desired sign-up and onboarding experience and tracks implementation status.
+
+Primary goals:
+- start signup in under 1 minute
+- enforce trust before activation
+- keep UX minimal, premium, and scalable
+
+---
+
+## TL;DR
+- `/register` is the **public pre-login signup** flow.
+- `/onboarding` is the **post-login setup** flow for approved school admins.
+- Signup should be **minimal and single-input guided**; deeper setup belongs to onboarding.
+
+---
+
+## Product Flow
+
+### Public Signup Flow (Pre-Login)
+1. User opens `/register`.
+2. User enters essentials in a guided sequence:
+   - school name
+   - admin email
+   - password
+   - confirm password
+   - optional preferred subdomain
+   - review
+3. System creates pending school + pending school admin.
+4. Verification email is sent.
+5. Admin verifies email.
+6. School enters super-admin review queue.
+7. Super admin approves or rejects.
+
+### Post-Approval Flow (Post-Login)
+1. Approved school admin logs in.
+2. School admin is routed through `/onboarding`.
+3. Setup completion progress is shown.
+4. School completes profile, classes, subjects, score metrics, and staff setup.
+
+---
+
+## UI/UX Specification
+
+### Signup UI/UX (Minimal by design)
+- one focused input per step (single-input guided UX)
+- clear progress indicator
+- instant inline validation
+- keyboard-friendly next/back flow
+- optional subdomain with live availability feedback
+- final review before submit
+- draft save/resume
+
+### Onboarding UI/UX (Post-login)
+- completion percentage and checklist cards
+- next recommended action
+- contextual AI hints (classes/subjects/trust signal)
+- progressive unlocking of setup steps
+- resume-friendly progress state
+
+### Super Admin Review UI/UX
+- clear queue of pending/active/rejected schools
+- filters:
+  - verified only
+  - pending too long
+  - generic email domains
+- approval/rejection actions with reason support
+
+---
+
+## What Is Implemented
+
+### Phase 1: Fast Signup, Verification, Review
+- public register endpoint: `POST /api/public/register-school`
+- minimal guided signup page at `/register` (single-input sequence + review)
+- assistant suggestions for school code/subdomain: `POST /api/public/onboarding-assistant`
+- inline subdomain availability check: `GET /api/public/subdomains/check`
+- pending school + school-admin creation
+- verification email generation + resend flow
+- verification page and verification endpoint
+- login blocked until verification + approval requirements are met
+- activation guard: cannot approve before verified primary admin
+- review queue endpoint + review filters
+- approval + rejection workflows
+- audit log for verification email delivery provider/fallback
+
+### Phase 1 Data Model Improvements Implemented
+- `users.onboarding_status`
+- `users.email_verified_at`
+- `schools.onboarding_status`
+- `schools.approved_at`
+- `schools.approved_by`
+- `schools.rejection_reason`
+
+### Phase 2: Progressive Setup
+- onboarding status endpoint: `GET /api/onboarding/status`
+- onboarding page at `/onboarding`
+- redirect gating for incomplete school admin setup
+- contextual assistant payload included in onboarding status
+- lightweight client-side onboarding progress snapshot/resume
+
+---
+
+## What Is Partially Implemented
+
+### Phase 2
+- onboarding persistence is client-side for now; no dedicated onboarding table yet
+- AI help is rule-based heuristics, not LLM-backed
+- grading default recommendations are only partially represented
+
+---
+
+## What Is Not Yet Implemented
+
+### Phase 2 Remaining
+- dedicated onboarding persistence table/record in DB
+- server-side autosave endpoints for each onboarding section
+- richer apply-suggestion actions (one-click seed classes/subjects/metrics)
+
+### Phase 3 (Trust, Compliance, Automation)
+- verification documents upload workflow
+- request-more-information workflow
+- stale signup reminders
+- trust scoring + low-risk auto-approval
+- suspension + recovery workflow with reason timeline
+
+---
+
+## Recommended Steps (Next Work Plan)
+
+### Immediate Next (High Value)
+1. Add dedicated onboarding persistence table (`school_onboarding` or equivalent).
+2. Add server endpoints for onboarding autosave:
+   - profile
+   - structure (classes/subjects)
+   - grading/score metrics
+   - staff setup
+3. Add one-click setup actions from assistant recommendations.
+
+### Then
+4. Add Phase 3 verification requests and document upload.
+5. Add reminders + trust scoring + suspension lifecycle.
+
+---
+
+## Registration Logic Clarification
+
+### Is the current register page invalid?
+Not as a route, but it is invalid **if it is not minimal**.  
+`/register` must stay focused on essentials only. Full profile/config fields do not belong there.
+
+### Does the app use onboarding page now?
+Yes. `/onboarding` is for post-login school-admin setup after activation.
+
+### Correct split of responsibilities
+- `/register`: create pending account quickly.
+- `/verify-email`: complete trust step.
+- `/school-review-queue`: super-admin decision point.
+- `/onboarding`: progressive setup after activation.
+
+---
+
+## Current Endpoints Map
+
+### Public
+- `POST /api/public/register-school`
+- `POST /api/public/onboarding-assistant`
+- `GET /api/public/subdomains/check`
+- `POST /api/public/verify-email`
+- `POST /api/public/resend-verification`
+
+### Admin/Internal
+- `GET /api/schools/review-queue`
+- `PATCH /api/schools/:id/status`
+- `POST /api/schools/:id/reject`
+- `GET /api/onboarding/status`
+
+---
+
+## Done vs Next Summary
+
+### Done
+- minimal guided signup + trust gate foundation
+- explicit onboarding/verification/approval metadata columns
+- review queue and filters
+- onboarding MVP with progress and gating
+
+### Next
+- DB-backed onboarding persistence and autosave
+- one-click assistant setup actions
+- Phase 3 trust/compliance automation
+
+# Sign-Up And Onboarding Specification
+
+## Purpose
 This document defines the onboarding model for the School Result Management System and now reflects both:
 - the target product direction
 - the current implementation status in this codebase

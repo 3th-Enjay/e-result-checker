@@ -1,30 +1,58 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useLocation, Link } from "wouter";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "wouter";
+import { ArrowLeft, ArrowRight, BadgeCheck, CheckCircle2, Loader2, ShieldCheck, Sparkles } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, CheckCircle2, Loader2, ShieldCheck, Upload, X } from "lucide-react";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { motion } from "framer-motion";
+import { Badge } from "@/components/ui/badge";
 import { BrandMark } from "@/components/brand-mark";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { Badge } from "@/components/ui/badge";
+import { useToast } from "@/hooks/use-toast";
+import { createSchoolCode, slugifySchoolName } from "@shared/onboarding";
 
-function createSchoolCode(name: string) {
-  const compact = name.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-  const initials = name
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((word) => word.replace(/[^a-zA-Z0-9]/g, "").slice(0, 1))
-    .join("")
-    .toUpperCase();
+type StepId =
+  | "schoolName"
+  | "adminEmail"
+  | "password"
+  | "confirmPassword"
+  | "preferredSubdomain"
+  | "review";
 
-  const base = initials.length >= 3 ? initials : (initials + compact).slice(0, 6);
-  return (base || "SCH").slice(0, 6);
+type RegisterFormData = {
+  schoolName: string;
+  adminEmail: string;
+  password: string;
+  confirmPassword: string;
+  preferredSubdomain: string;
+};
+
+type AssistantResponse = {
+  suggestedSchoolCode: string;
+  suggestedSubdomain: string;
+  subdomainCandidates: string[];
+  trustSignal: {
+    level: "high" | "medium" | "review";
+    label: string;
+    description: string;
+  };
+  assistantSummary: string;
+  subdomainAvailable?: boolean;
+};
+
+const REGISTER_DRAFT_KEY = "register_draft_v3";
+const stepOrder: StepId[] = ["schoolName", "adminEmail", "password", "confirmPassword", "preferredSubdomain", "review"];
+
+const emptyForm: RegisterFormData = {
+  schoolName: "",
+  adminEmail: "",
+  password: "",
+  confirmPassword: "",
+  preferredSubdomain: "",
+};
+
+function emailLooksValid(value: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 }
 
 function normalizeSubdomainInput(value: string) {
@@ -38,556 +66,396 @@ function normalizeSubdomainInput(value: string) {
     .replace(/^-|-$/g, "");
 }
 
+function getStepError(stepId: StepId, formData: RegisterFormData) {
+  if (stepId === "schoolName") {
+    if (!formData.schoolName.trim()) return "School name is required";
+    if (formData.schoolName.trim().length < 3) return "Use at least 3 characters";
+    return "";
+  }
+  if (stepId === "adminEmail") {
+    if (!formData.adminEmail.trim()) return "Admin email is required";
+    if (!emailLooksValid(formData.adminEmail)) return "Enter a valid email";
+    return "";
+  }
+  if (stepId === "password") {
+    if (!formData.password) return "Password is required";
+    if (formData.password.length < 6) return "Password must be at least 6 characters";
+    return "";
+  }
+  if (stepId === "confirmPassword") {
+    if (!formData.confirmPassword) return "Confirm your password";
+    if (formData.confirmPassword !== formData.password) return "Passwords do not match";
+    return "";
+  }
+  if (stepId === "preferredSubdomain") {
+    if (!formData.preferredSubdomain) return "";
+    if (formData.preferredSubdomain.length < 3) return "Subdomain must be at least 3 characters";
+    return "";
+  }
+  return "";
+}
+
+function getValueForStep(stepId: StepId, formData: RegisterFormData) {
+  if (stepId === "schoolName") return formData.schoolName;
+  if (stepId === "adminEmail") return formData.adminEmail;
+  if (stepId === "password") return formData.password;
+  if (stepId === "confirmPassword") return formData.confirmPassword;
+  if (stepId === "preferredSubdomain") return formData.preferredSubdomain;
+  return "";
+}
+
+function loadDraft() {
+  try {
+    const raw = localStorage.getItem(REGISTER_DRAFT_KEY);
+    if (!raw) return { formData: emptyForm, stepId: "schoolName" as StepId };
+    const parsed = JSON.parse(raw) as { formData?: Partial<RegisterFormData>; stepId?: StepId };
+    return {
+      formData: { ...emptyForm, ...parsed.formData },
+      stepId: stepOrder.includes(parsed.stepId as StepId) ? (parsed.stepId as StepId) : ("schoolName" as StepId),
+    };
+  } catch {
+    return { formData: emptyForm, stepId: "schoolName" as StepId };
+  }
+}
+
 export default function Register() {
-  const [, setLocation] = useLocation();
   const { toast } = useToast();
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const initialDraft = useMemo(() => loadDraft(), []);
+
+  const [formData, setFormData] = useState<RegisterFormData>(initialDraft.formData);
+  const [currentStepId, setCurrentStepId] = useState<StepId>(initialDraft.stepId);
+  const [assistant, setAssistant] = useState<AssistantResponse | null>(null);
+  const [assistantLoading, setAssistantLoading] = useState(false);
   const [loading, setLoading] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [logoPreview, setLogoPreview] = useState<string | null>(null);
-  const [subdomainCheck, setSubdomainCheck] = useState<{
-    loading: boolean;
-    requested?: string;
-    available?: boolean;
-    suggestion?: string;
-  }>({ loading: false });
+  const [attemptedAdvance, setAttemptedAdvance] = useState(false);
+  const [result, setResult] = useState<{
+    message: string;
+    school?: { code?: string; subdomain?: string };
+    emailDelivery?: { mode?: string };
+    verificationPreviewUrl?: string;
+  } | null>(null);
 
-  const [formData, setFormData] = useState({
-    schoolName: "",
-    schoolCode: "",
-    preferredSubdomain: "",
-    schoolEmail: "",
-    schoolPhone: "",
-    schoolAddress: "",
-    adminFirstName: "",
-    adminLastName: "",
-    adminEmail: "",
-    password: "",
-    confirmPassword: "",
-    logo: "",
-  });
+  const deferredSchoolName = useDeferredValue(formData.schoolName);
+  const deferredAdminEmail = useDeferredValue(formData.adminEmail);
+  const deferredSubdomain = useDeferredValue(formData.preferredSubdomain);
 
-  const suggestedSchoolCode = useMemo(() => createSchoolCode(formData.schoolName), [formData.schoolName]);
-  const previewSchoolCode = formData.schoolCode.trim() || suggestedSchoolCode;
+  const stepIndex = stepOrder.indexOf(currentStepId);
+  const progressPercent = ((stepIndex + 1) / stepOrder.length) * 100;
+  const currentError = getStepError(currentStepId, formData);
+  const localSuggestedSubdomain = slugifySchoolName(formData.schoolName.trim() || "school-workspace");
+  const previewSubdomain = formData.preferredSubdomain.trim() || assistant?.suggestedSubdomain || localSuggestedSubdomain;
+  const previewSchoolCode = assistant?.suggestedSchoolCode || createSchoolCode(formData.schoolName.trim() || "School");
 
   useEffect(() => {
-    const value = normalizeSubdomainInput(formData.preferredSubdomain);
-    if (!value) {
-      setSubdomainCheck({ loading: false });
+    if (result) return;
+    localStorage.setItem(
+      REGISTER_DRAFT_KEY,
+      JSON.stringify({
+        formData,
+        stepId: currentStepId,
+      }),
+    );
+  }, [formData, currentStepId, result]);
+
+  useEffect(() => {
+    setAttemptedAdvance(false);
+    if (currentStepId === "review") return;
+    const id = window.setTimeout(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }, 120);
+    return () => window.clearTimeout(id);
+  }, [currentStepId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!deferredSchoolName.trim() || !emailLooksValid(deferredAdminEmail)) {
+      setAssistant(null);
       return;
     }
 
-    let cancelled = false;
-    setSubdomainCheck((prev) => ({ ...prev, loading: true }));
-
     const timeoutId = window.setTimeout(async () => {
       try {
-        const params = new URLSearchParams({ value });
-        const res = await fetch(`/api/public/subdomains/check?${params.toString()}`);
-        const payload = await res.json();
-        if (!res.ok) {
-          throw new Error(payload.message || "Unable to check subdomain availability");
-        }
-        if (!cancelled) {
-          setSubdomainCheck({
-            loading: false,
-            requested: payload.requested,
-            available: payload.available,
-            suggestion: payload.suggestion,
-          });
-        }
+        setAssistantLoading(true);
+        const response = await fetch("/api/public/onboarding-assistant", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            schoolName: deferredSchoolName.trim(),
+            adminEmail: deferredAdminEmail.trim(),
+            preferredSubdomain: normalizeSubdomainInput(deferredSubdomain) || undefined,
+          }),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.message || "Unable to load assistant");
+        if (!cancelled) setAssistant(payload);
       } catch {
-        if (!cancelled) {
-          setSubdomainCheck({ loading: false });
-        }
+        if (!cancelled) setAssistant(null);
+      } finally {
+        if (!cancelled) setAssistantLoading(false);
       }
-    }, 280);
+    }, 250);
 
     return () => {
       cancelled = true;
       window.clearTimeout(timeoutId);
     };
-  }, [formData.preferredSubdomain]);
+  }, [deferredSchoolName, deferredAdminEmail, deferredSubdomain]);
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    const { name, value } = e.target;
+  const handleFieldChange = (name: keyof RegisterFormData, value: string) => {
     setFormData((prev) => ({
       ...prev,
-      [name]:
-        name === "schoolCode"
-          ? value.replace(/\s+/g, "").toUpperCase()
-          : name === "preferredSubdomain"
-            ? normalizeSubdomainInput(value)
-            : value,
+      [name]: name === "preferredSubdomain" ? normalizeSubdomainInput(value) : value,
     }));
   };
 
-  const handleLogoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (!file.type.startsWith("image/")) {
-      toast({ variant: "destructive", title: "Invalid file", description: "Please upload an image file" });
-      return;
-    }
-
-    if (file.size > 2 * 1024 * 1024) {
-      toast({ variant: "destructive", title: "File too large", description: "Please upload an image smaller than 2MB" });
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const dataUrl = event.target?.result as string;
-      setLogoPreview(dataUrl);
-      setFormData((prev) => ({ ...prev, logo: dataUrl }));
-    };
-    reader.readAsDataURL(file);
+  const goBack = () => {
+    if (stepIndex === 0) return;
+    setCurrentStepId(stepOrder[stepIndex - 1]);
   };
 
-  const removeLogo = () => {
-    setLogoPreview(null);
-    setFormData((prev) => ({ ...prev, logo: "" }));
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
+  const goNext = () => {
+    if (currentStepId === "review") return;
+    if (currentError) {
+      setAttemptedAdvance(true);
+      return;
     }
+    setCurrentStepId(stepOrder[stepIndex + 1]);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    const schoolCode = previewSchoolCode.toUpperCase();
-
-    if (
-      !formData.schoolName.trim() ||
-      !schoolCode ||
-      !formData.schoolEmail.trim() ||
-      !formData.adminFirstName.trim() ||
-      !formData.adminLastName.trim() ||
-      !formData.adminEmail.trim() ||
-      !formData.password
-    ) {
-      toast({
-        variant: "destructive",
-        title: "Missing information",
-        description: "Please complete the required school and admin fields before continuing.",
-      });
-      return;
-    }
-
-    if (schoolCode.length < 3) {
-      toast({ variant: "destructive", title: "School code too short", description: "Use at least 3 characters for the school code." });
-      return;
-    }
-
-    if (formData.password !== formData.confirmPassword) {
-      toast({ variant: "destructive", title: "Error", description: "Passwords do not match" });
-      return;
-    }
-
-    if (formData.password.length < 6) {
-      toast({ variant: "destructive", title: "Error", description: "Password must be at least 6 characters" });
+  const handleSubmit = async () => {
+    const blockingStep = stepOrder.find((step) => getStepError(step, formData));
+    if (blockingStep) {
+      setCurrentStepId(blockingStep);
+      setAttemptedAdvance(true);
       return;
     }
 
     setLoading(true);
-
     try {
       const response = await fetch("/api/public/register-school", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           schoolName: formData.schoolName.trim(),
-          schoolCode,
-          preferredSubdomain: formData.preferredSubdomain.trim() || undefined,
-          schoolEmail: formData.schoolEmail.trim(),
-          schoolPhone: formData.schoolPhone.trim(),
-          schoolAddress: formData.schoolAddress.trim(),
-          adminFirstName: formData.adminFirstName.trim(),
-          adminLastName: formData.adminLastName.trim(),
           adminEmail: formData.adminEmail.trim(),
           adminPassword: formData.password,
-          logo: formData.logo || undefined,
+          schoolCode: previewSchoolCode,
+          preferredSubdomain: previewSubdomain,
         }),
       });
 
       const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || "Registration failed");
 
-      if (!response.ok) {
-        throw new Error(payload.message || "Registration failed");
-      }
-
-      const registeredCode = payload.school?.code || schoolCode;
-
-      toast({
-        title: "Registration Submitted",
-        description: `Your school workspace was created with code ${registeredCode}. A super admin must approve the school and admin account before login.`,
-      });
-
-      setLocation("/login");
+      localStorage.removeItem(REGISTER_DRAFT_KEY);
+      setResult(payload);
+      toast({ title: "Signup created", description: payload.message });
     } catch (error: any) {
-      toast({ variant: "destructive", title: "Registration Failed", description: error.message });
+      toast({ variant: "destructive", title: "Registration failed", description: error.message || "Unable to register." });
     } finally {
       setLoading(false);
     }
   };
 
+  const inputLabel = (() => {
+    if (currentStepId === "schoolName") return "School name";
+    if (currentStepId === "adminEmail") return "Admin email";
+    if (currentStepId === "password") return "Create password";
+    if (currentStepId === "confirmPassword") return "Confirm password";
+    return "Preferred subdomain (optional)";
+  })();
+
+  const inputType = currentStepId === "adminEmail" ? "email" : currentStepId.includes("password") ? "password" : "text";
+  const inputName = currentStepId as keyof RegisterFormData;
+  const inputPlaceholder =
+    currentStepId === "schoolName"
+      ? "Greenfield Academy"
+      : currentStepId === "adminEmail"
+        ? "admin@school.edu.ng"
+        : currentStepId === "password"
+          ? "Minimum 6 characters"
+          : currentStepId === "confirmPassword"
+            ? "Re-enter password"
+            : "greenfield-academy";
+
+  const showInlineError = currentStepId !== "review" && currentError && (attemptedAdvance || Boolean(getValueForStep(currentStepId, formData)));
+
+  if (result) {
+    return (
+      <div className="mesh-hero min-h-screen p-4 lg:p-6">
+        <div className="mx-auto flex min-h-[calc(100vh-2rem)] max-w-3xl items-center justify-center">
+          <Card className="w-full premium-shell border-white/10 bg-card/94">
+            <CardHeader className="space-y-4">
+              <div className="flex items-center gap-3">
+                <BrandMark size="lg" />
+                <div>
+                  <p className="text-sm font-semibold">SmartResultChecker</p>
+                  <p className="text-xs text-muted-foreground">Guided signup complete</p>
+                </div>
+              </div>
+              <CardTitle className="text-3xl font-bold tracking-tight">Your school account is created</CardTitle>
+              <CardDescription>{result.message}</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="rounded-xl border border-border/70 bg-background/70 p-4">
+                <p className="text-sm text-muted-foreground">School code</p>
+                <p className="text-2xl font-semibold mono-data">{result.school?.code || previewSchoolCode}</p>
+                <p className="mt-3 text-sm text-muted-foreground">Workspace</p>
+                <p className="text-lg font-semibold">{(result.school?.subdomain || previewSubdomain)}.smartresult.app</p>
+              </div>
+              <div className="flex gap-3">
+                {result.verificationPreviewUrl ? (
+                  <Button className="rounded-xl" onClick={() => window.location.assign(result.verificationPreviewUrl!)}>Open verification link</Button>
+                ) : null}
+                <Link href="/login">
+                  <Button variant="outline" className="rounded-xl">Go to login</Button>
+                </Link>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="mesh-hero min-h-screen p-4 lg:p-6">
-      <div className="mx-auto grid min-h-[calc(100vh-2rem)] max-w-7xl overflow-hidden rounded-[2rem] border border-white/10 bg-background/65 shadow-2xl backdrop-blur-xl lg:grid-cols-[0.96fr_1.04fr]">
-        <motion.section
-          initial={{ opacity: 0, x: -24 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ duration: 0.55 }}
-          className="relative hidden overflow-hidden bg-slate-950 p-10 text-white lg:flex lg:flex-col"
-        >
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(16,185,129,0.18),transparent_30%),radial-gradient(circle_at_bottom_right,rgba(99,102,241,0.22),transparent_26%)]" />
-          <div className="relative flex items-start justify-between">
+      <div className="mx-auto grid min-h-[calc(100vh-2rem)] max-w-6xl overflow-hidden rounded-[2rem] border border-white/10 bg-background/65 shadow-2xl backdrop-blur-xl lg:grid-cols-[1fr_1fr]">
+        <section className="hidden bg-slate-950 p-10 text-white lg:flex lg:flex-col">
+          <div className="flex items-start justify-between">
             <Link href="/">
-              <Button variant="ghost" size="sm" className="gap-2 rounded-xl text-white hover:bg-white/10 hover:text-white" data-testid="link-back-home">
-                <ArrowLeft className="w-4 h-4" />
-                Back to Home
+              <Button variant="ghost" size="sm" className="gap-2 rounded-xl text-white hover:bg-white/10 hover:text-white">
+                <ArrowLeft className="h-4 w-4" /> Back to Home
               </Button>
             </Link>
             <ThemeToggle className="rounded-xl border-white/10 bg-white/5 text-white hover:bg-white/10 hover:text-white" />
           </div>
-
-          <div className="relative mt-14 max-w-xl">
-            <span className="section-kicker border-white/10 bg-white/10 text-white">School onboarding</span>
-            <h1 className="mt-6 text-5xl font-black leading-[1.02] tracking-[-0.06em]">
-              Launch a branded result workspace that feels premium from day one.
-            </h1>
-            <p className="mt-6 text-lg leading-8 text-slate-300">
-              Set up your school identity, admin owner, and approval-ready details in one polished onboarding flow.
+          <div className="mt-16">
+            <span className="section-kicker border-white/10 bg-white/10 text-white">Fast signup</span>
+            <h1 className="mt-5 text-5xl font-black tracking-[-0.05em]">One decision at a time.</h1>
+            <p className="mt-5 text-lg leading-8 text-slate-300">
+              This signup captures only essentials, sends verification immediately, and leaves full setup for onboarding after approval.
             </p>
           </div>
+        </section>
 
-          <div className="relative mt-10 space-y-4">
-            {[
-              "School branding carries through public result checks and internal dashboards",
-              "Admin approval keeps new institutions controlled and trustworthy",
-              "Structured signup reduces back-and-forth before the school goes live",
-            ].map((item) => (
-              <div key={item} className="flex items-start gap-3 rounded-[1.35rem] border border-white/10 bg-white/5 p-4">
-                <div className="mt-0.5 rounded-full bg-emerald-400/15 p-1.5 text-emerald-300">
-                  <CheckCircle2 className="h-4 w-4" />
-                </div>
-                <p className="text-sm leading-7 text-slate-200">{item}</p>
-              </div>
-            ))}
-          </div>
-
-          <div className="relative mt-auto rounded-[1.6rem] border border-white/10 bg-white/5 p-5">
-            <div className="flex items-center gap-3">
-              <BrandMark size="sm" className="shadow-none" />
-              <div>
-                <p className="text-sm font-semibold">Designed to build confidence</p>
-                <p className="text-xs text-slate-300">A polished interface helps schools look organized, modern, and trustworthy from the first interaction.</p>
-              </div>
-            </div>
-          </div>
-        </motion.section>
-
-        <motion.section
-          initial={{ opacity: 0, x: 24 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ duration: 0.55, delay: 0.06 }}
-          className="flex items-center justify-center p-5 sm:p-8 lg:p-10"
-        >
-          <div className="w-full max-w-3xl">
-            <div className="mb-5 flex items-center justify-between lg:hidden">
+        <section className="flex items-center justify-center p-6 sm:p-8 lg:p-10">
+          <div className="w-full max-w-2xl">
+            <div className="mb-4 flex items-center justify-between lg:hidden">
               <Link href="/">
-                <Button variant="ghost" size="sm" className="gap-2 rounded-xl" data-testid="link-back-home-mobile">
-                  <ArrowLeft className="w-4 h-4" />
-                  Home
+                <Button variant="ghost" size="sm" className="gap-2 rounded-xl">
+                  <ArrowLeft className="h-4 w-4" /> Home
                 </Button>
               </Link>
               <ThemeToggle className="rounded-xl" />
             </div>
+
             <Card className="premium-shell border-white/10 bg-card/92">
-              <CardHeader className="space-y-4 px-6 pt-6 sm:px-8 sm:pt-8">
-                <div className="flex items-center justify-between gap-4">
+              <CardHeader>
+                <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <BrandMark size="lg" />
                     <div>
                       <p className="text-sm font-semibold">SmartResultChecker</p>
-                      <p className="text-xs text-muted-foreground">Premium school onboarding</p>
+                      <p className="text-xs text-muted-foreground">Minimal guided signup</p>
                     </div>
                   </div>
                   <Badge variant="outline" className="rounded-full border-primary/15 bg-primary/10 text-primary">
-                    <ShieldCheck className="mr-1 h-3.5 w-3.5" /> Structured
+                    <ShieldCheck className="mr-1 h-3.5 w-3.5" /> Step {stepIndex + 1}/{stepOrder.length}
                   </Badge>
                 </div>
-                <div>
-                  <CardTitle className="text-3xl font-bold tracking-tight">Register your school</CardTitle>
-                  <CardDescription className="mt-2 text-sm leading-6">
-                    Create the school workspace, set the primary admin owner, and submit the account for activation.
-                  </CardDescription>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-border/70">
+                  <div className="h-full rounded-full bg-[linear-gradient(90deg,#1e3a8a,#2563eb,#10b981)] transition-all" style={{ width: `${progressPercent}%` }} />
                 </div>
+                <CardTitle className="text-3xl font-bold tracking-tight">Register your school</CardTitle>
+                <CardDescription>
+                  {currentStepId === "review"
+                    ? "Confirm details and create the pending school account."
+                    : "Enter one field, continue, and keep momentum."}
+                </CardDescription>
               </CardHeader>
-              <CardContent className="px-6 pb-6 sm:px-8 sm:pb-8">
-                <form onSubmit={handleSubmit} className="space-y-6">
-                  <div className="grid gap-4 rounded-[1.5rem] border border-border/70 bg-background/80 p-4 sm:grid-cols-[1.05fr_0.95fr]">
-                    <div>
-                      <p className="text-sm font-semibold">School profile</p>
-                      <p className="mt-1 text-xs leading-6 text-muted-foreground">This powers school branding, communication, and the approval workflow.</p>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-                      <Badge variant="outline" className="rounded-full border-primary/15 bg-primary/10 text-primary">
-                        Pending approval
-                      </Badge>
-                      <Badge variant="outline" className="rounded-full mono-data">
-                        Code: {previewSchoolCode}
-                      </Badge>
-                    </div>
-                  </div>
 
-                  <div className="grid gap-5 md:grid-cols-2">
+              <CardContent className="space-y-5">
+                {currentStepId !== "review" ? (
+                  <>
                     <div className="space-y-2">
-                      <Label htmlFor="schoolName">School Name *</Label>
+                      <Label htmlFor={currentStepId}>{inputLabel}</Label>
                       <Input
-                        id="schoolName"
-                        name="schoolName"
-                        placeholder="Demo High School"
-                        value={formData.schoolName}
-                        onChange={handleChange}
-                        required
-                        data-testid="input-school-name"
+                        ref={inputRef}
+                        id={currentStepId}
+                        type={inputType}
+                        value={getValueForStep(currentStepId, formData)}
+                        placeholder={inputPlaceholder}
+                        onChange={(e) => handleFieldChange(inputName, e.target.value)}
                         className="h-12 rounded-xl"
                       />
+                      {showInlineError ? <p className="text-sm text-destructive">{currentError}</p> : null}
                     </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="schoolCode">School Code</Label>
-                      <Input
-                        id="schoolCode"
-                        name="schoolCode"
-                        placeholder={suggestedSchoolCode}
-                        value={formData.schoolCode}
-                        onChange={handleChange}
-                        data-testid="input-school-code"
-                        className="h-12 rounded-xl mono-data uppercase"
-                      />
-                      <p className="text-xs text-muted-foreground">Leave blank to use the suggested code, or enter your preferred short code.</p>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="preferredSubdomain">Preferred Workspace URL (optional)</Label>
-                    <Input
-                      id="preferredSubdomain"
-                      name="preferredSubdomain"
-                      placeholder="e.g. greenfield-academy"
-                      value={formData.preferredSubdomain}
-                      onChange={handleChange}
-                      data-testid="input-preferred-subdomain"
-                      className="h-12 rounded-xl"
-                    />
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                      <span>Preview:</span>
-                      <span className="font-semibold text-foreground">
-                        {(formData.preferredSubdomain || "your-school")}.smartresult.app
-                      </span>
-                      {subdomainCheck.loading ? (
-                        <Badge variant="secondary" className="rounded-full">Checking…</Badge>
-                      ) : typeof subdomainCheck.available === "boolean" ? (
-                        subdomainCheck.available ? (
-                          <Badge className="rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">Available</Badge>
-                        ) : (
-                          <Badge variant="destructive" className="rounded-full">Taken</Badge>
-                        )
-                      ) : null}
-                      {!subdomainCheck.loading && subdomainCheck.available === false && subdomainCheck.suggestion ? (
-                        <span>
-                          Suggested:{" "}
-                          <span className="font-semibold text-foreground">{subdomainCheck.suggestion}.smartresult.app</span>
-                        </span>
-                      ) : null}
-                    </div>
-                  </div>
-
-                  <div className="grid gap-5 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label htmlFor="schoolEmail">School Email *</Label>
-                      <Input
-                        id="schoolEmail"
-                        name="schoolEmail"
-                        type="email"
-                        placeholder="info@school.edu.ng"
-                        value={formData.schoolEmail}
-                        onChange={handleChange}
-                        required
-                        data-testid="input-school-email"
-                        className="h-12 rounded-xl"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="schoolPhone">School Phone</Label>
-                      <Input
-                        id="schoolPhone"
-                        name="schoolPhone"
-                        type="tel"
-                        placeholder="0800 000 0000"
-                        value={formData.schoolPhone}
-                        onChange={handleChange}
-                        data-testid="input-school-phone"
-                        className="h-12 rounded-xl"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="schoolAddress">School Address</Label>
-                    <Textarea
-                      id="schoolAddress"
-                      name="schoolAddress"
-                      placeholder="Campus address or administrative office location"
-                      value={formData.schoolAddress}
-                      onChange={handleChange}
-                      data-testid="input-school-address"
-                      className="min-h-[110px] rounded-xl"
-                    />
-                  </div>
-
-                  <div className="rounded-[1.35rem] border border-border/70 bg-background/80 p-4">
-                    <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
-                      <div className="flex items-center gap-4">
-                        {logoPreview ? (
-                          <div className="relative">
-                            <Avatar className="h-20 w-20 border border-white/10 shadow-sm">
-                              <AvatarImage src={logoPreview} alt="School logo" />
-                              <AvatarFallback className="bg-primary/10 text-primary font-semibold">
-                                {formData.schoolName.slice(0, 2).toUpperCase() || "SR"}
-                              </AvatarFallback>
-                            </Avatar>
-                            <Button type="button" variant="destructive" size="icon" className="absolute -right-2 -top-2 h-7 w-7 rounded-full" onClick={removeLogo} data-testid="button-remove-logo">
-                              <X className="h-3 w-3" />
-                            </Button>
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            className="flex h-20 w-20 items-center justify-center rounded-[1.2rem] border border-dashed border-border bg-muted/50 text-muted-foreground transition hover:border-primary/40 hover:text-primary"
-                            onClick={() => fileInputRef.current?.click()}
-                          >
-                            <Upload className="h-5 w-5" />
-                          </button>
-                        )}
-                        <div>
-                          <p className="font-medium">School logo</p>
-                          <p className="mt-1 text-sm text-muted-foreground">Optional, but it strengthens branding across result sheets, the public checker, and approval views.</p>
-                        </div>
+                    {currentStepId === "preferredSubdomain" ? (
+                      <div className="text-xs text-muted-foreground">
+                        Workspace preview: <span className="font-semibold text-foreground">{previewSubdomain}.smartresult.app</span>
+                        {" · "}
+                        {assistantLoading ? "Checking..." : assistant?.subdomainAvailable === false ? "Taken (we will suggest a safe alternative)." : "Looks good."}
                       </div>
-                      <div className="sm:ml-auto">
-                        <input ref={fileInputRef} type="file" accept="image/*" onChange={handleLogoChange} className="hidden" data-testid="input-logo" />
-                        <Button type="button" variant="outline" className="rounded-xl" onClick={() => fileInputRef.current?.click()} data-testid="button-upload-logo">
-                          <Upload className="mr-2 h-4 w-4" /> Upload logo
-                        </Button>
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="space-y-3 rounded-xl border border-border/70 bg-background/70 p-4">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground">School name</span>
+                      <span className="font-medium">{formData.schoolName}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground">Admin email</span>
+                      <span className="font-medium">{formData.adminEmail}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground">School code</span>
+                      <span className="font-semibold mono-data">{previewSchoolCode}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground">Workspace</span>
+                      <span className="font-semibold">{previewSubdomain}.smartresult.app</span>
+                    </div>
+                    {assistant ? (
+                      <div className="mt-2 rounded-lg border border-primary/15 bg-primary/5 p-3 text-xs text-muted-foreground">
+                        <p className="font-semibold flex items-center gap-1 text-foreground"><Sparkles className="h-3.5 w-3.5" /> Assistant</p>
+                        <p className="mt-1">{assistant.assistantSummary}</p>
                       </div>
-                    </div>
+                    ) : null}
                   </div>
+                )}
 
-                  <div className="surface-divider pt-1" />
-
-                  <div>
-                    <p className="text-sm font-semibold">Primary admin owner</p>
-                    <p className="mt-1 text-xs leading-6 text-muted-foreground">This person receives the first school admin account after approval.</p>
-                  </div>
-
-                  <div className="grid gap-5 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label htmlFor="adminFirstName">First Name *</Label>
-                      <Input
-                        id="adminFirstName"
-                        name="adminFirstName"
-                        placeholder="Amina"
-                        value={formData.adminFirstName}
-                        onChange={handleChange}
-                        required
-                        data-testid="input-admin-first-name"
-                        className="h-12 rounded-xl"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="adminLastName">Last Name *</Label>
-                      <Input
-                        id="adminLastName"
-                        name="adminLastName"
-                        placeholder="Okafor"
-                        value={formData.adminLastName}
-                        onChange={handleChange}
-                        required
-                        data-testid="input-admin-last-name"
-                        className="h-12 rounded-xl"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="adminEmail">Admin Email *</Label>
-                    <Input
-                      id="adminEmail"
-                      name="adminEmail"
-                      type="email"
-                      placeholder="admin@school.edu.ng"
-                      value={formData.adminEmail}
-                      onChange={handleChange}
-                      required
-                      data-testid="input-admin-email"
-                      className="h-12 rounded-xl"
-                    />
-                    <p className="text-xs text-muted-foreground">This email is used for the initial admin login after the school is approved.</p>
-                  </div>
-
-                  <div className="grid gap-5 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label htmlFor="password">Password *</Label>
-                      <Input
-                        id="password"
-                        name="password"
-                        type="password"
-                        placeholder="Minimum 6 characters"
-                        value={formData.password}
-                        onChange={handleChange}
-                        required
-                        data-testid="input-password"
-                        className="h-12 rounded-xl"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="confirmPassword">Confirm Password *</Label>
-                      <Input
-                        id="confirmPassword"
-                        name="confirmPassword"
-                        type="password"
-                        placeholder="Confirm password"
-                        value={formData.confirmPassword}
-                        onChange={handleChange}
-                        required
-                        data-testid="input-confirm-password"
-                        className="h-12 rounded-xl"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="rounded-2xl border border-primary/10 bg-primary/5 p-4 text-sm text-muted-foreground">
-                    After registration, a super admin activates the school and admin account before live use. Until approval, the submitted admin credentials will not sign in.
-                  </div>
-
-                  <Button type="submit" className="h-12 w-full rounded-xl text-base" disabled={loading} data-testid="button-submit">
-                    {loading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Registering...</> : "Create School Workspace"}
+                <div className="flex items-center justify-between gap-3">
+                  <Button variant="outline" className="rounded-xl" onClick={goBack} disabled={stepIndex === 0 || loading}>
+                    Back
                   </Button>
-                </form>
+                  {currentStepId === "review" ? (
+                    <Button className="rounded-xl gap-2" onClick={handleSubmit} disabled={loading}>
+                      {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <BadgeCheck className="h-4 w-4" />}
+                      {loading ? "Creating..." : "Create School Account"}
+                    </Button>
+                  ) : (
+                    <Button className="rounded-xl gap-2" onClick={goNext}>
+                      Next <ArrowRight className="h-4 w-4" />
+                    </Button>
+                  )}
+                </div>
 
-                <div className="surface-divider mt-6 pt-6 text-center text-sm text-muted-foreground">
+                <div className="text-center text-sm text-muted-foreground">
                   Already have an account?{" "}
                   <Link href="/login">
-                    <span className="cursor-pointer font-medium text-primary hover:underline" data-testid="link-login">Login here</span>
+                    <span className="cursor-pointer font-medium text-primary hover:underline">Login here</span>
                   </Link>
                 </div>
               </CardContent>
             </Card>
           </div>
-        </motion.section>
+        </section>
       </div>
     </div>
   );
 }
+
