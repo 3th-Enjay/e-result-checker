@@ -1,4 +1,4 @@
-﻿import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, Link } from "wouter";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -27,16 +27,34 @@ function createSchoolCode(name: string) {
   return (base || "SCH").slice(0, 6);
 }
 
+function normalizeSubdomainInput(value: string) {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/^https?:\/\//, "")
+    .replace(/\.smartresult\.app\/?$/, "")
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
 export default function Register() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const [loading, setLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
+  const [subdomainCheck, setSubdomainCheck] = useState<{
+    loading: boolean;
+    requested?: string;
+    available?: boolean;
+    suggestion?: string;
+  }>({ loading: false });
 
   const [formData, setFormData] = useState({
     schoolName: "",
     schoolCode: "",
+    preferredSubdomain: "",
     schoolEmail: "",
     schoolPhone: "",
     schoolAddress: "",
@@ -51,11 +69,55 @@ export default function Register() {
   const suggestedSchoolCode = useMemo(() => createSchoolCode(formData.schoolName), [formData.schoolName]);
   const previewSchoolCode = formData.schoolCode.trim() || suggestedSchoolCode;
 
+  useEffect(() => {
+    const value = normalizeSubdomainInput(formData.preferredSubdomain);
+    if (!value) {
+      setSubdomainCheck({ loading: false });
+      return;
+    }
+
+    let cancelled = false;
+    setSubdomainCheck((prev) => ({ ...prev, loading: true }));
+
+    const timeoutId = window.setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ value });
+        const res = await fetch(`/api/public/subdomains/check?${params.toString()}`);
+        const payload = await res.json();
+        if (!res.ok) {
+          throw new Error(payload.message || "Unable to check subdomain availability");
+        }
+        if (!cancelled) {
+          setSubdomainCheck({
+            loading: false,
+            requested: payload.requested,
+            available: payload.available,
+            suggestion: payload.suggestion,
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setSubdomainCheck({ loading: false });
+        }
+      }
+    }, 280);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [formData.preferredSubdomain]);
+
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
     setFormData((prev) => ({
       ...prev,
-      [name]: name === "schoolCode" ? value.replace(/\s+/g, "").toUpperCase() : value,
+      [name]:
+        name === "schoolCode"
+          ? value.replace(/\s+/g, "").toUpperCase()
+          : name === "preferredSubdomain"
+            ? normalizeSubdomainInput(value)
+            : value,
     }));
   };
 
@@ -136,6 +198,7 @@ export default function Register() {
         body: JSON.stringify({
           schoolName: formData.schoolName.trim(),
           schoolCode,
+          preferredSubdomain: formData.preferredSubdomain.trim() || undefined,
           schoolEmail: formData.schoolEmail.trim(),
           schoolPhone: formData.schoolPhone.trim(),
           schoolAddress: formData.schoolAddress.trim(),
@@ -304,6 +367,40 @@ export default function Register() {
                         className="h-12 rounded-xl mono-data uppercase"
                       />
                       <p className="text-xs text-muted-foreground">Leave blank to use the suggested code, or enter your preferred short code.</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="preferredSubdomain">Preferred Workspace URL (optional)</Label>
+                    <Input
+                      id="preferredSubdomain"
+                      name="preferredSubdomain"
+                      placeholder="e.g. greenfield-academy"
+                      value={formData.preferredSubdomain}
+                      onChange={handleChange}
+                      data-testid="input-preferred-subdomain"
+                      className="h-12 rounded-xl"
+                    />
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                      <span>Preview:</span>
+                      <span className="font-semibold text-foreground">
+                        {(formData.preferredSubdomain || "your-school")}.smartresult.app
+                      </span>
+                      {subdomainCheck.loading ? (
+                        <Badge variant="secondary" className="rounded-full">Checking…</Badge>
+                      ) : typeof subdomainCheck.available === "boolean" ? (
+                        subdomainCheck.available ? (
+                          <Badge className="rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">Available</Badge>
+                        ) : (
+                          <Badge variant="destructive" className="rounded-full">Taken</Badge>
+                        )
+                      ) : null}
+                      {!subdomainCheck.loading && subdomainCheck.available === false && subdomainCheck.suggestion ? (
+                        <span>
+                          Suggested:{" "}
+                          <span className="font-semibold text-foreground">{subdomainCheck.suggestion}.smartresult.app</span>
+                        </span>
+                      ) : null}
                     </div>
                   </div>
 
