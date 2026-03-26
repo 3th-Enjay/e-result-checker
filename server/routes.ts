@@ -215,6 +215,79 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ===== Onboarding (Phase 2 MVP) =====
+  // The onboarding "wizard" is currently a checklist/dashboard that is derived from existing records.
+  // Later iterations can persist onboarding progress into a dedicated table.
+  app.get("/api/onboarding/status", authenticate, authorize("school_admin"), async (req: AuthRequest, res) => {
+    try {
+      const schoolId = req.user!.schoolId;
+      if (!schoolId) {
+        return res.status(403).json({ message: "School association required" });
+      }
+
+      const [school, classes, subjects, scoreMetrics, users] = await Promise.all([
+        storage.getSchool(schoolId),
+        storage.listClasses(schoolId),
+        storage.listSubjects(schoolId),
+        storage.listScoreMetrics(schoolId),
+        storage.listUsers(schoolId),
+      ]);
+
+      if (!school) {
+        return res.status(404).json({ message: "School not found" });
+      }
+
+      const teachers = users.filter((u) => u.role === "teacher");
+
+      const steps = [
+        {
+          id: "profile",
+          title: "School profile & branding",
+          done: Boolean(school.logo) || Boolean(school.motto) || Boolean(school.address),
+          nextActionUrl: "/profile",
+          progressHint: "Logo/motto/address help your school look official and appear correctly on releases.",
+        },
+        {
+          id: "classes",
+          title: "Create classes",
+          done: classes.length > 0,
+          nextActionUrl: "/classes",
+          progressHint: "Classes are required to build result sheets and map learners correctly.",
+        },
+        {
+          id: "subjects",
+          title: "Create subjects",
+          done: subjects.length > 0,
+          nextActionUrl: "/subjects",
+          progressHint: "Subjects power the curriculum mapping used for result entry.",
+        },
+        {
+          id: "score-metrics",
+          title: "Configure score metrics",
+          done: scoreMetrics.length > 0,
+          nextActionUrl: "/score-metrics",
+          progressHint: "Score metrics define how totals, grades, and remarks are computed.",
+        },
+        {
+          id: "staff",
+          title: "Invite staff (teachers)",
+          done: teachers.length > 0,
+          nextActionUrl: "/teachers",
+          progressHint: "Teachers enable result submission workflows inside the school workspace.",
+        },
+      ] as const;
+
+      const totalSteps: number = steps.length;
+      const doneSteps = steps.filter((s) => s.done).length;
+      const completionPercent = Math.round((doneSteps / totalSteps) * 100);
+      const nextStepId = steps.find((s) => !s.done)?.id;
+
+      res.json({ completionPercent, steps, nextStepId });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
   app.post("/api/schools", authenticate, authorize("super_admin"), async (req: AuthRequest, res) => {
     try {
       const { name, code, email, subdomain, logo, initialPassword } = req.body;

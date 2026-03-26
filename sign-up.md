@@ -167,7 +167,7 @@ After approval, the school admin should be guided through the rest of school set
 - staff invitation setup
 
 ### Current status
-- not yet implemented as a dedicated onboarding wizard
+- Phase 2 backend onboarding status endpoint implemented (UI + redirect still pending)
 - some related configuration screens already exist elsewhere in the app
 
 ### Suggested improvements for Phase 2
