@@ -2326,6 +2326,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         subdomain: school.subdomain || `${slugifySchoolName(school.name)}.smartresult.app`,
       });
 
+      await storage.createAuditLog({
+        userId: user.id,
+        schoolId: school.id,
+        action: "verification_email_delivery",
+        resource: "user",
+        resourceId: user.id,
+        details: {
+          mode: emailDelivery.mode,
+          providerLabel: emailDelivery.providerLabel,
+          ok: emailDelivery.ok,
+          fallback: emailDelivery.mode === "console",
+        },
+      });
+
       res.json({
         message: "Verification email sent successfully.",
         emailDelivery,
@@ -2392,6 +2406,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         schoolName: school.name,
         verificationUrl,
         subdomain: `${subdomain}.smartresult.app`,
+      });
+
+      await storage.createAuditLog({
+        userId: user.id,
+        schoolId: school.id,
+        action: "verification_email_delivery",
+        resource: "user",
+        resourceId: user.id,
+        details: {
+          mode: emailDelivery.mode,
+          providerLabel: emailDelivery.providerLabel,
+          ok: emailDelivery.ok,
+          fallback: emailDelivery.mode === "console",
+        },
       });
 
       const superAdmins = await listSuperAdmins();

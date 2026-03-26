@@ -145,7 +145,7 @@ A school should be able to create a pending account quickly, verify the admin em
   - verified only
   - pending too long
   - generic email domains
-- add audit log detail for which provider sent the email and whether delivery fell back
+- add audit log detail for which provider sent the email and whether delivery fell back (implemented: `verification_email_delivery` audit log)
 - improve inline subdomain availability feedback directly on the signup step (implemented: live `/api/public/subdomains/check`)
 
 ### UX improvements still worth adding in Phase 1
